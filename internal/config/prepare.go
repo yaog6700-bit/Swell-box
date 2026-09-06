@@ -37,6 +37,10 @@ func PrepareRuntimeConfig(userConfigPath, runtimePath string, dashboardPort int,
 	ensureCacheFile(root, tunMode)
 	// Prefer local rule-set files under workdir (offline-first).
 	preferLocalRuleSets(root)
+	// sing-box ≥1.14 deprecated the implicit default HTTP client across ALL
+	// HTTP-using components (remote rule-sets, DoH DNS, ACME, Clash API, etc.).
+	// Always inject an explicit http_clients entry + route.default_http_client.
+	ensureHTTPClient(root)
 	// sing-box ≥1.12 rejects detour:"direct" on DNS servers.
 	stripDirectDNSDetour(root)
 	// Empty selector/urltest (common in full templates before subscription fills
@@ -329,6 +333,116 @@ func preferLocalRuleSets(root map[string]any) {
 	}
 	route["rule_set"] = list
 	root["route"] = route
+}
+
+// ensureHTTPClient implements the sing-box ≥1.14 http_clients API.
+//
+// sing-box 1.14 deprecated the implicit default HTTP client across ALL
+// HTTP-using components: remote rule-sets, DoH/DoT DNS servers, ACME
+// certificate providers, Clash API, etc. Even configs with only local
+// rule-sets trigger the deprecation if DoH servers are present.
+//
+// The fix is to always inject an explicit top-level http_clients entry
+// and point route.default_http_client at it, whenever a proxy outbound
+// is available to use as the detour.
+func ensureHTTPClient(root map[string]any) {
+	route, _ := root["route"].(map[string]any)
+	if route == nil {
+		return
+	}
+	list, _ := route["rule_set"].([]any)
+	detour := pickProxyOutboundTag(root)
+	if detour == "" {
+		return
+	}
+
+	const clientTag = "swell-http-client"
+
+	// 1. Ensure http_clients contains our managed entry.
+	clients, _ := root["http_clients"].([]any)
+	found := false
+	for i, item := range clients {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if tag, _ := m["tag"].(string); tag == clientTag {
+			// Already present — update detour in case active config changed.
+			m["detour"] = detour
+			clients[i] = m
+			found = true
+			break
+		}
+	}
+	if !found {
+		clients = append(clients, map[string]any{
+			"tag":    clientTag,
+			"detour": detour,
+		})
+	}
+	root["http_clients"] = clients
+
+	// 2. Set route.default_http_client (only if not already pointing to a
+	//    user-defined client other than the legacy "default" sentinel).
+	existing, _ := route["default_http_client"].(string)
+	if existing == "" || existing == "default" {
+		route["default_http_client"] = clientTag
+	}
+
+	// 3. Strip legacy download_detour from individual remote rule-sets — that
+	//    option is also deprecated in 1.14 and causes a second FATAL in 1.15.
+	for i, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "remote" {
+			continue
+		}
+		delete(m, "download_detour")
+		list[i] = m
+	}
+	route["rule_set"] = list
+	root["route"] = route
+}
+
+// pickProxyOutboundTag returns the best outbound tag to use as a download detour
+// for remote rule-sets. Priority:
+//  1. An outbound with tag "proxy" (the canonical Swell-Box selector)
+//  2. The first selector/urltest outbound
+//  3. The first leaf proxy outbound (not direct/block/dns/reject)
+func pickProxyOutboundTag(root map[string]any) string {
+	outbounds, _ := root["outbounds"].([]any)
+	var firstSelector, firstLeaf string
+	for _, item := range outbounds {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag, _ := m["tag"].(string)
+		if tag == "" {
+			continue
+		}
+		t, _ := m["type"].(string)
+		switch t {
+		case "direct", "block", "dns":
+			continue
+		}
+		// Exact match wins immediately.
+		if tag == "proxy" {
+			return "proxy"
+		}
+		if (t == "selector" || t == "urltest") && firstSelector == "" {
+			firstSelector = tag
+		}
+		if t != "selector" && t != "urltest" && firstLeaf == "" {
+			firstLeaf = tag
+		}
+	}
+	if firstSelector != "" {
+		return firstSelector
+	}
+	return firstLeaf
 }
 
 // RuntimeConfigPath returns ~/.swellbox/runtime/config.runtime.json
