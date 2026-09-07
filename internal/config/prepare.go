@@ -116,8 +116,6 @@ func applyTunMode(root map[string]any, enabled bool) {
 			"auto_route":                 true,
 			"strict_route":               false,
 			"stack":                      "mixed",
-			"sniff":                      true,
-			"sniff_override_destination": true,
 			"route_exclude_address": []any{
 				"10.0.0.0/8",
 				"172.16.0.0/12",
@@ -146,6 +144,12 @@ func applyTunMode(root map[string]any, enabled bool) {
 			route = map[string]any{}
 		}
 		route["auto_detect_interface"] = true
+		
+		// Enable sniffing globally (modern sing-box 1.11+ replaces inbound sniff)
+		route["sniff"] = map[string]any{
+			"enable":               true,
+			"override_destination": true,
+		}
 		if ifName := defaultOutboundInterface(); ifName != "" {
 			// Prefer explicit default when detection works (matches Anywhere).
 			route["default_interface"] = ifName
