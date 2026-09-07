@@ -140,67 +140,14 @@ func applyTunMode(root map[string]any, enabled bool) {
 			route = map[string]any{}
 		}
 		route["auto_detect_interface"] = true
-		if ifName := defaultOutboundInterface(); ifName != "" {
-			// Prefer explicit default when detection works (matches Anywhere).
-			route["default_interface"] = ifName
-			bindDirectOutbounds(root, ifName)
-		}
+		// Let sing-box auto-detect the default interface based on destination IP.
+		// Forcing default_interface or bind_interface breaks IPv6 if the primary
+		// IPv4 interface is different from the IPv6 interface (or PPPoE is used).
 		root["route"] = route
 	}
 	root["inbounds"] = inbounds
 }
 
-// bindDirectOutbounds sets bind_interface on all outbounds that make real
-// network connections so that TUN-mode traffic always leaves via the physical
-// NIC instead of re-entering the TUN interface and causing a routing loop.
-//
-// This covers:
-//   - direct outbounds (return-path traffic)
-//   - all leaf proxy outbounds (shadowsocks, vmess, vless, trojan, hysteria2,
-//     wireguard, tuic, etc.) — their connections to the remote proxy server
-//     must bypass TUN or they loop back into sing-box indefinitely.
-//
-// selector/urltest/block/dns outbounds are skipped because they have no
-// network layer of their own.
-func bindDirectOutbounds(root map[string]any, ifName string) {
-	if ifName == "" {
-		return
-	}
-	// Types that open real sockets and must be bound to the physical NIC.
-	isBindable := func(t string) bool {
-		switch t {
-		case "direct",
-			"shadowsocks", "shadowsocksr",
-			"vmess", "vless",
-			"trojan", "trojan-go",
-			"hysteria", "hysteria2",
-			"tuic",
-			"wireguard",
-			"ssh",
-			"http", "socks":
-			return true
-		}
-		return false
-	}
-
-	outbounds, _ := root["outbounds"].([]any)
-	for i, item := range outbounds {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		t, _ := m["type"].(string)
-		if !isBindable(t) {
-			continue
-		}
-		if _, has := m["bind_interface"]; has {
-			continue
-		}
-		m["bind_interface"] = ifName
-		outbounds[i] = m
-	}
-	root["outbounds"] = outbounds
-}
 
 func hasUserTun(inbounds []any) bool {
 	for _, item := range inbounds {
