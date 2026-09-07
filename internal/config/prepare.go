@@ -144,12 +144,6 @@ func applyTunMode(root map[string]any, enabled bool) {
 			route = map[string]any{}
 		}
 		route["auto_detect_interface"] = true
-		
-		// Enable sniffing globally (modern sing-box 1.11+ replaces inbound sniff)
-		route["sniff"] = map[string]any{
-			"enable":               true,
-			"override_destination": true,
-		}
 		if ifName := defaultOutboundInterface(); ifName != "" {
 			// Prefer explicit default when detection works (matches Anywhere).
 			route["default_interface"] = ifName
