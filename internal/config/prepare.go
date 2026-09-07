@@ -150,19 +150,47 @@ func applyTunMode(root map[string]any, enabled bool) {
 	root["inbounds"] = inbounds
 }
 
-// bindDirectOutbounds sets bind_interface on direct outbounds so return path
-// traffic leaves via the physical NIC instead of re-entering TUN.
+// bindDirectOutbounds sets bind_interface on all outbounds that make real
+// network connections so that TUN-mode traffic always leaves via the physical
+// NIC instead of re-entering the TUN interface and causing a routing loop.
+//
+// This covers:
+//   - direct outbounds (return-path traffic)
+//   - all leaf proxy outbounds (shadowsocks, vmess, vless, trojan, hysteria2,
+//     wireguard, tuic, etc.) — their connections to the remote proxy server
+//     must bypass TUN or they loop back into sing-box indefinitely.
+//
+// selector/urltest/block/dns outbounds are skipped because they have no
+// network layer of their own.
 func bindDirectOutbounds(root map[string]any, ifName string) {
 	if ifName == "" {
 		return
 	}
+	// Types that open real sockets and must be bound to the physical NIC.
+	isBindable := func(t string) bool {
+		switch t {
+		case "direct",
+			"shadowsocks", "shadowsocksr",
+			"vmess", "vless",
+			"trojan", "trojan-go",
+			"hysteria", "hysteria2",
+			"tuic",
+			"wireguard",
+			"ssh",
+			"http", "socks":
+			return true
+		}
+		return false
+	}
+
 	outbounds, _ := root["outbounds"].([]any)
 	for i, item := range outbounds {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		if t, _ := m["type"].(string); t != "direct" {
+		t, _ := m["type"].(string)
+		if !isBindable(t) {
 			continue
 		}
 		if _, has := m["bind_interface"]; has {
