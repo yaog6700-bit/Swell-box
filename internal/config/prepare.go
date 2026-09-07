@@ -145,8 +145,6 @@ func applyTunMode(root map[string]any, enabled bool) {
 		}
 		route["auto_detect_interface"] = true
 		if ifName := defaultOutboundInterface(); ifName != "" {
-			// Prefer explicit default when detection works (matches Anywhere).
-			route["default_interface"] = ifName
 			bindDirectOutbounds(root, ifName)
 		}
 		root["route"] = route
