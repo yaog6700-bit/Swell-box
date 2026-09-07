@@ -75,42 +75,51 @@ jobs:
             runner: ubuntu-latest
             ext: ""
             core_bin: sing-box
-          # Build linux/arm64 under Docker on x64 runners — native ubuntu-*-arm
-          # apt to ports.ubuntu.com frequently fails (IPv6 exit 100).
+          # Build linux/arm64 via cross-compilation (aarch64 toolchain on x64).
+          # Much faster than QEMU emulation; CGO uses gcc-aarch64-linux-gnu.
           - goos: linux
             goarch: arm64
             runner: ubuntu-latest
             ext: ""
             core_bin: sing-box
-            docker_arm: true
+            cross_arm64: true
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
-        if: ${{ !matrix.docker_arm }}
         with:
           go-version: "1.22.x"
           cache: true
 
-      - name: Set up QEMU (linux/arm64 Docker)
-        if: matrix.docker_arm
-        uses: docker/setup-qemu-action@v3
-
       - name: Install Linux tray deps
-        if: ${{ matrix.goos == 'linux' && !matrix.docker_arm }}
+        if: ${{ matrix.goos == 'linux' }}
         run: |
           set -euo pipefail
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 > /dev/null
           export DEBIAN_FRONTEND=noninteractive
           ok=0
           for i in 1 2 3 4 5; do
             echo "=== apt attempt ${i}/5 ==="
-            if sudo -E apt-get update -o Acquire::Retries=5 \
-              && sudo -E apt-get install -y --fix-missing \
-                   libgtk-3-dev libayatana-appindicator3-dev; then
-              ok=1
-              break
+            if [[ "${{ matrix.cross_arm64 }}" == "true" ]]; then
+              # Cross-compile: install aarch64 toolchain + arm64 GTK libraries.
+              sudo dpkg --add-architecture arm64
+              if sudo -E apt-get update -o Acquire::Retries=5 \
+                && sudo -E apt-get install -y --fix-missing \
+                     gcc-aarch64-linux-gnu \
+                     libgtk-3-dev:arm64 \
+                     libayatana-appindicator3-dev:arm64 \
+                     pkg-config; then
+                ok=1
+                break
+              fi
+            else
+              if sudo -E apt-get update -o Acquire::Retries=5 \
+                && sudo -E apt-get install -y --fix-missing \
+                     libgtk-3-dev libayatana-appindicator3-dev; then
+                ok=1
+                break
+              fi
             fi
             echo "apt failed, retrying..." >&2
             sleep $((i * 10))
@@ -136,37 +145,28 @@ jobs:
             & $rsrc -ico $ico -arch $arch -o ".\cmd\swellbox\rsrc_windows_${arch}.syso"
           }
 
-      - name: Build Swell-Box (Docker linux/arm64)
-        if: matrix.docker_arm
+      - name: Build Swell-Box (cross linux/arm64)
+        if: matrix.cross_arm64
         shell: bash
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          CC: aarch64-linux-gnu-gcc
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: |
           set -euo pipefail
           mkdir -p dist/package
           VER="${{ needs.meta.outputs.version }}"
           REPO="yaog6700-bit/Swell-Box"
           LDFLAGS="-s -w -X github.com/swell-app/swellbox/internal/update.AppVersion=${VER} -X github.com/swell-app/swellbox/internal/update.AppReleaseRepo=${REPO}"
-          # Use bash -c (not -lc): login shells drop image ENV PATH so `go` disappears.
-          docker run --rm --platform linux/arm64 \
-            -v "$PWD":/src -w /src \
-            -e CGO_ENABLED=1 \
-            -e PATH="/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-            golang:1.22-bookworm \
-            bash -c "
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
-              export PATH=\"/usr/local/go/bin:\$PATH\"
-              command -v go
-              go version
-              apt-get update
-              apt-get install -y --no-install-recommends libgtk-3-dev libayatana-appindicator3-dev pkg-config
-              go build -buildvcs=false -ldflags '${LDFLAGS}' -o dist/Swell-Box ./cmd/swellbox
-              chmod +x dist/Swell-Box
-              cp dist/Swell-Box dist/package/
-              ls -la dist/Swell-Box
-            "
+          go build -buildvcs=false -ldflags "$LDFLAGS" -o dist/Swell-Box ./cmd/swellbox
+          chmod +x dist/Swell-Box
+          cp dist/Swell-Box dist/package/
+          ls -la dist/Swell-Box
 
       - name: Build Swell-Box
-        if: ${{ !matrix.docker_arm }}
+        if: ${{ !matrix.cross_arm64 }}
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
