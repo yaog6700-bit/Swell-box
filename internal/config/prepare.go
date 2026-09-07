@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/swell-app/swellbox/internal/paths"
 )
@@ -54,6 +55,9 @@ func PrepareRuntimeConfig(userConfigPath, runtimePath string, dashboardPort int,
 	// Also surface nested leaves on parent selectors (Manual first row).
 	exposeNestedLeavesInSelectors(root)
 	applyTunMode(root, tunMode)
+	if tunMode {
+		disableAAAAInject(root)
+	}
 
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
@@ -142,14 +146,72 @@ func applyTunMode(root map[string]any, enabled bool) {
 			route = map[string]any{}
 		}
 		route["auto_detect_interface"] = true
-		// Let sing-box auto-detect the default interface based on destination IP.
-		// Forcing default_interface or bind_interface breaks IPv6 if the primary
-		// IPv4 interface is different from the IPv6 interface (or PPPoE is used).
+		if ifName := defaultOutboundInterface(); ifName != "" {
+			// Prefer explicit default when detection works (matches Anywhere).
+			route["default_interface"] = ifName
+			bindDirectOutbounds(root, ifName)
+		}
 		root["route"] = route
 	}
 	root["inbounds"] = inbounds
 }
 
+// bindDirectOutbounds sets bind_interface on all outbounds that make real
+// network connections so that TUN-mode traffic always leaves via the physical
+// NIC instead of re-entering the TUN interface and causing a routing loop.
+//
+// This covers:
+//   - direct outbounds (return-path traffic)
+//   - all leaf proxy outbounds (shadowsocks, vmess, vless, trojan, hysteria2,
+//     wireguard, tuic, etc.) — their connections to the remote proxy server
+//     must bypass TUN or they loop back into sing-box indefinitely.
+//
+// selector/urltest/block/dns outbounds are skipped because they have no
+// network layer of their own.
+func bindDirectOutbounds(root map[string]any, ifName string) {
+	if ifName == "" {
+		return
+	}
+	// Types that open real sockets and must be bound to the physical NIC.
+	isBindable := func(t string) bool {
+		switch t {
+		case "direct",
+			"shadowsocks", "shadowsocksr",
+			"vmess", "vless",
+			"trojan", "trojan-go",
+			"hysteria", "hysteria2",
+			"tuic",
+			"wireguard",
+			"ssh",
+			"http", "socks":
+			return true
+		}
+		return false
+	}
+
+	outbounds, _ := root["outbounds"].([]any)
+	for i, item := range outbounds {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _ := m["type"].(string)
+		if !isBindable(t) {
+			continue
+		}
+		if _, has := m["bind_interface"]; has {
+			continue
+		}
+		// Windows often fails to route IPv6 sockets bound to an interface index
+		// if the default IPv6 route is on a different interface.
+		if server, ok := m["server"].(string); ok && strings.Contains(server, ":") {
+			continue
+		}
+		m["bind_interface"] = ifName
+		outbounds[i] = m
+	}
+	root["outbounds"] = outbounds
+}
 
 func hasUserTun(inbounds []any) bool {
 	for _, item := range inbounds {
@@ -429,4 +491,25 @@ func RuntimeConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "runtime", "config.runtime.json"), nil
+}
+
+// disableAAAAInject adds a DNS rule to reject AAAA queries in TUN mode.
+// This prevents Windows from attempting to route raw IPv6 connections into TUN,
+// which proxy servers often lack the capability to handle out-of-band.
+func disableAAAAInject(root map[string]any) {
+	dns, _ := root["dns"].(map[string]any)
+	if dns == nil {
+		dns = map[string]any{}
+	}
+	rules, _ := dns["rules"].([]any)
+
+	rejectRule := map[string]any{
+		"query_type": []string{"AAAA"},
+		"action":     "reject",
+		"method":     "default",
+	}
+	rules = append([]any{rejectRule}, rules...)
+	
+	dns["rules"] = rules
+	root["dns"] = dns
 }
